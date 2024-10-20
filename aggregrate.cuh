@@ -2,6 +2,16 @@
 #define AGGREGRATE_H
 #include "graph.cuh"
 #include "embedding.cuh"
+
+//功能：将嵌入 (emb) 转换为一个唯一的模式 ID (patternID)
+//计算嵌入中各个顶点的编码，并最终形成一个用于识别模式的 ID：
+//顶点编码：为每个嵌入中的顶点创建一个唯一编码。编码包含多个信息：
+//1.顶点的顺序。
+//2.顶点的度（即与之相连的边的数量）。
+//3.顶点的标签。
+//迭代编码：通过迭代的方式，结合顶点的连接关系逐步优化编码。
+//生成模式 ID：根据顶点编码，生成一个模式 ID，其中包含模式的邻接关系和顶点标签
+
 __device__ patternID emb2pattern_id(KeyT *emb, label_type *einfo, uint32_t *vlabel, int len, CSRGraph g) {
 	//Here is how we use vlabel to keep all charactors we use
 	//for dulicated vids, their 32-bit wide data is used as : 0xf(real data pos)fffffff(all set to 1)
@@ -9,6 +19,12 @@ __device__ patternID emb2pattern_id(KeyT *emb, label_type *einfo, uint32_t *vlab
 	//"emb" is only used for vertex duplicate check, after that, it is used for vertex encoding
 	//memset(vlabel, 0, sizeof(uint32_t)*len);
 	//TODO bit usage has not been changed after we enlarge the bit number of patternID
+
+	//vlabel的使用说明：用于保存我们需要的所有字符或者特征。
+	//是数据结构 emb 在不同阶段有不同的功能：一开始用于验证数据的唯一性，后来用于对顶点进行标识和编码。
+	//如何为重复的顶点编写ID：32 位整数来存储顶点的数据，前四位设置成0xf，表示实际数据位置，后面的 28 位全设置为 1（即 0xfffffff）
+	//vlabel会重新置为零，以此来防止垃圾数据
+	//可能会根据需要重新调优
 	vlabel[0] = 0;
 	//count the number of distinct vertex
 	int distinct_v = 1;
@@ -120,6 +136,12 @@ __device__ patternID emb2pattern_id(KeyT *emb, label_type *einfo, uint32_t *vlab
 	}
 	return pattern_id;
 }
+
+//功能：对嵌入列表中的每个嵌入调用 emb2pattern_id，将嵌入映射到唯一的模式 ID。
+//实现细节：
+//使用共享内存存储嵌入和相关信息 (local_emb, local_einfo, vlabel)，减少访存延迟。
+//通过 for 循环并行处理每个嵌入列表中的嵌入。
+//根据嵌入的有效性生成模式 ID，并存储在 pids 数组中。
 __global__ void map_emb2pid(CSRGraph g, EmbeddingList emblist, patternID *pids, 
 				            int level, emb_off_type base_off, uint32_t emb_size) {
 		__shared__ KeyT local_emb[BLOCK_SIZE][embedding_max_length];
@@ -146,6 +168,10 @@ __global__ void map_emb2pid(CSRGraph g, EmbeddingList emblist, patternID *pids,
 		}
 		return ;
 }
+
+//功能：控制嵌入到模式 ID 的映射过程，使用 CUDA 核函数 map_emb2pid 来完成该任务。
+//将嵌入列表按批次处理，减少 GPU 资源的占用。
+//调用 map_emb2pid 核函数，将所有嵌入映射为模式 ID
 
 void map_embeddings_to_pids(CSRGraph g, EmbeddingList emb_list, patternID *pattern_ids, int level) {
 		uint64_t emb_nums = emb_list.size(level);
@@ -181,6 +207,9 @@ void map_embeddings_to_pids(CSRGraph g, EmbeddingList emb_list, patternID *patte
 	return ;
 }
 
+//统计频繁出现的模式，并将其标记为频繁模式。
+//使用共享内存和 __shfl_down_sync 来并行归约每个线程的计数结果。
+//如果某个模式的出现次数达到指定阈值 (threshold)，将其标记为频繁模式。
 
 __global__ void count_frequent_pattern(patternID *pattern_ids, emb_off_type pid_size, int threshold, 
 									   uint32_t *fre_pattern_num, uint8_t *stencil) {
@@ -204,6 +233,11 @@ __global__ void count_frequent_pattern(patternID *pattern_ids, emb_off_type pid_
 	}
 	return ;
 }
+
+//验证嵌入是否属于频繁模式，并标记有效嵌入。
+//通过调用 emb2pattern_id 为嵌入生成模式 ID。
+//使用二分查找 (binarySearch) 判断生成的模式 ID 是否是频繁模式。
+//对符合条件的嵌入标记为有效嵌入。
 
 __global__ void emb_validation_check(EmbeddingList emb_list, emb_off_type emb_size, patternID *fre_patterns,
 									 uint32_t fre_pattern_num, uint8_t *valid_embs, int level, 
@@ -246,6 +280,11 @@ struct cmp_pid {
 		return p1.nbr < p2.nbr || (p1.nbr == p2.nbr && p1.lab < p2.lab);
 	}
 };
+
+//设置边模式的频繁模式标志，用于快速判断哪些边模式是频繁的。
+//遍历嵌入列表中的每对顶点，并将其标签组合标记为频繁模式。
+//使用原子操作 (atomicOr) 设置频繁边模式标志，以避免数据竞争。
+
 __global__ void set_freq_edge_pattern(EmbeddingList emb_list, emb_off_type emb_size, uint32_t l, uint32_t *freq_edge_patterns, CSRGraph g) {
 	__shared__ KeyT sh_emb[BLOCK_SIZE][embedding_max_length];
 	int thread_id = threadIdx.x+ blockDim.x*blockIdx.x;
@@ -262,9 +301,15 @@ __global__ void set_freq_edge_pattern(EmbeddingList emb_list, emb_off_type emb_s
 	}
 	return ;
 }
+
+//关键函数：
+//功能：执行嵌入和模式的过滤和聚合
+//包括排序嵌入模式 ID、统计频繁模式、过滤出有效嵌入等操作。
+
 void aggregrate_and_filter(CSRGraph g, EmbeddingList emb_list, patternID *pattern_ids, int level, int threshold, uint32_t *freq_edge_patterns) {
 	//sort all pattern_ids
 	//WARNING: this may cause all embedding list thrash bettween cpu and gpu, but that's affordable
+	//使用 thrust::sort 对嵌入的模式 ID 进行排序，便于后续的频繁模式统计。
 	emb_off_type pid_size = emb_list.size(level);
 	log_info("start sort embedding ids... ...");
 	thrust::sort(thrust::device, pattern_ids, pattern_ids + pid_size, cmp_pid());//TODO: out of memory?
@@ -278,6 +323,8 @@ void aggregrate_and_filter(CSRGraph g, EmbeddingList emb_list, patternID *patter
 	check_cuda_error(cudaMalloc((void **)&fre_pattern_num, BLOCK_SIZE/32*sizeof(uint32_t)*block_num));
 	check_cuda_error(cudaMemset(fre_pattern_num, 0, BLOCK_SIZE/32*sizeof(uint32_t)*block_num));
 	//TODO here we assume all pattern_ids and stential can be put on the device, and no batch process
+	//使用 count_frequent_pattern 核函数统计满足阈值的频繁模式。
+	//使用 thrust::reduce 计算频繁模式的数量。
 	count_frequent_pattern<<<block_num, BLOCK_SIZE>>>(pattern_ids, pid_size, threshold, fre_pattern_num, stencil);
 	check_cuda_error(cudaDeviceSynchronize());
 	uint32_t total_fre_pattern = thrust::reduce(thrust::device, fre_pattern_num, fre_pattern_num + BLOCK_SIZE/32*block_num);//the number of valid patterns
@@ -302,11 +349,13 @@ void aggregrate_and_filter(CSRGraph g, EmbeddingList emb_list, patternID *patter
 		emb_off_type base_off = (emb_off_type)i*expand_batch_size;
 		uint32_t cur_size = pid_size - base_off;
 		cur_size = cur_size > expand_batch_size ? expand_batch_size : cur_size;
+		//使用 emb_validation_check 核函数验证每个嵌入是否属于频繁模式。
 		emb_validation_check<<<block_num, BLOCK_SIZE>>>(emb_list, cur_size, fre_patterns, total_fre_pattern, valid_emb, level, base_off, d_counter, g);
 		check_cuda_error(cudaDeviceSynchronize());
 		valid_emb_num += thrust::reduce(thrust::device, d_counter, d_counter+BLOCK_SIZE/32*block_num);
 	}
 	log_info("embedding validation check done, and valid emb num for now is %d",valid_emb_num);
+	//将验证后的有效嵌入保留，丢弃无效嵌入，从而压缩嵌入列表。
 	check_cuda_error(cudaFree(d_counter));
 	//embedding list compaction
 	emb_list.compaction(level, valid_emb, valid_emb_num);
@@ -320,3 +369,9 @@ void aggregrate_and_filter(CSRGraph g, EmbeddingList emb_list, patternID *patter
 }
 
 #endif
+
+//1.用编码的方式将嵌入转化为唯一的模式ID
+//2.统计模式ID的频繁程度
+//3.对嵌入列表进行过滤和压缩，仅保留符合频繁模式的嵌入。
+//4.通过 CUDA 的块（block）和线程（thread）并行机制，加速了模式 ID 计算、频繁模式统计等过程。
+//例如，__shfl_down_sync 用于线程间的高效数据交换和归约，减少了线程间的同步开销。

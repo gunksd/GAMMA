@@ -37,6 +37,10 @@ class EmbeddingList {
 public:
 	EmbeddingList() {}
 	~EmbeddingList() {}
+	//嵌入列表的初始化与内存管理
+	//初始化用于存储图嵌入的各个层级数据，并决定内存的分配方式。
+	//两种不同的内存模式：GPU_MEM 模式：直接在 GPU 上分配内存，适合需要高性能且数据量较小的场景。
+	//UNIFIED_MEM 模式：使用统一内存，将 CPU 和 GPU 的内存共享，通过 cudaMemAdvise 指定优先存放的位置来优化性能。
 	void init(OffsetT initial_size, unsigned max_size , mem_type mem_tp, bool use_edge_label, bool use_dag = true) {
 		last_level = 0;
 		assert(max_size > 1);
@@ -66,6 +70,7 @@ public:
 		//allocate memory for the first layer
 		switch (memory_type) {
 			case GPU_MEM:
+			//在 GPU 上分配内存，用于保存嵌入数据。这种方式性能高但更复杂，需要处理 GPU 与 CPU 之间的数据交换。
 				check_cuda_error(cudaMalloc((void **)&h_vid_lists[0], nnz * sizeof(KeyT)));
 				check_cuda_error(cudaMemset(h_vid_lists[0]+nnz-32, -1, sizeof(KeyT)*32));
 				//check_cuda_error(cudaMalloc((void **)&h_idx_lists[0], nnz * sizeof(KeyT)));
@@ -75,6 +80,7 @@ public:
 				}
 				break;
 			case UNIFIED_MEM:
+			//使用统一内存，将 CPU 和 GPU 的内存共享，通过 cudaMemAdvise 指定优先存放的位置来优化性能。
 				check_cuda_error(cudaMallocManaged((void **)&all_vid, sizeof(KeyT)*MAX_EMB_UNIT_NUM));
 				check_cuda_error(cudaMallocManaged((void **)&all_idx, sizeof(emb_off_type)*MAX_EMB_UNIT_NUM));
 				check_cuda_error(cudaMemAdvise(all_vid, sizeof(KeyT)*MAX_EMB_UNIT_NUM, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId));
@@ -99,6 +105,8 @@ public:
 			check_cuda_error(cudaMemcpy(d_edge_infos, h_edge_infos, max_level * sizeof(label_type*), cudaMemcpyHostToDevice));
 		
 	}
+
+	//嵌入的获取与展示
 	void display(int level, int display_num) {
 		KeyT **ho_vid_lists = new KeyT *[level+1];
 		emb_off_type **ho_idx_lists = new emb_off_type *[level+1];
@@ -161,6 +169,8 @@ public:
 		delete [] ho_vid_lists;
 		return;
 	}
+	//将嵌入与模式 ID 关联起来，从而可以识别和分析图中的频繁模式。
+	//通过对嵌入进行编码和与模式 ID 匹配，可以帮助找出频繁子图
 	void check_all(int level, uint64_t display_num, patternID *pattern_ids, CSRGraph g) {
 		KeyT **ho_vid_lists = new KeyT *[level+1];
 		emb_off_type **ho_idx_lists = new emb_off_type *[level+1];
@@ -217,6 +227,8 @@ public:
 	//__device__ VertexList get_vid_list(unsigned level) { return vid_lists[level]; }
 	//__device__ UintList get_idx_list(unsigned level) { return idx_lists[level]; }
 	//__device__ ByteList get_his_list(unsigned level) { return his_lists[level]; }
+	
+	//作用是向嵌入列表中添加新的层。每当你对图结构进行扩展时，你需要为新的嵌入层级分配存储空间。
 	void add_level(emb_off_type size, uint32_t level) { 
 		//WARNING: this function works in a different way for GPU_MEM and UNIFIED_MEM:
 		//GPU_MEM : allocation designed-sized memory
@@ -227,6 +239,7 @@ public:
 		assert(last_level < max_level);
 		switch (memory_type) {
 			case GPU_MEM:
+			//对于 GPU_MEM，函数在 GPU 内存上分配空间，并初始化部分值
 				check_cuda_error(cudaMalloc((void **)&h_vid_lists[last_level], size * sizeof(KeyT)));
 				check_cuda_error(cudaMalloc((void **)&h_idx_lists[last_level], size * sizeof(emb_off_type)));
 				//TODO: here we set size of frontiers multiple of 32
@@ -239,6 +252,9 @@ public:
 				sizes[last_level] = size;
 				break;
 			case UNIFIED_MEM:
+			//对于 UNIFIED_MEM 模式，则直接指向大块内存的一部分，这样的设计避免了频繁的内存分配操作
+			//通过维护一个内存头指针 mem_head 来管理内存的使用，特别是对于大规模图。
+			//这种内存管理方式能够节省大量内存分配时间。
 				h_vid_lists[last_level] = all_vid + mem_head;
 				h_idx_lists[last_level] = all_idx + mem_head;
             	//check_cuda_error(cudaMemAdvise(h_vid_lists[last_level], size*sizeof(KeyT), cudaMemAdviseSetReadMostly, 0));
@@ -254,6 +270,9 @@ public:
 		if (enable_elabel)
 			check_cuda_error(cudaMemcpy(d_edge_infos, h_edge_infos, max_level * sizeof(history_type*), cudaMemcpyHostToDevice));
 	}
+	
+	//嵌入列表的压缩与有效性管理
+	//目的是过滤掉嵌入列表中无效的嵌入，从而减小存储和计算的负担
 	void compaction(unsigned l, uint8_t *valid_emb, uint32_t valid_emb_size) {
 		//TODO here we firstly assume that this function will only be used when VERTEX LABEL and EINFO are enabled
 		KeyT *new_vid;
@@ -263,6 +282,7 @@ public:
 		valid_emb_size = (valid_emb_size + 31)/32*32;
 		switch (memory_type) {
 				case GPU_MEM:
+				//thrust::copy_if
 					printf("COMPACTION ON DEVICE MEMORY IS NOT SUPPORT YET\n");
 					/*check_cuda_error(cudaMalloc((void **)&new_vid, sizeof(KeyT)*valid_emb_size));
 					check_cuda_error(cudaMemset(new_vid + valid_emb_size - 32, -1, sizeof(KeyT)*32));
@@ -447,3 +467,8 @@ private:
 };
 
 #endif // EMBEDDING_CUH_
+//1.首先进行内存管理，选择适合的内存管理方式
+//2.在嵌入的递归处理过程中，需要不断为每层数据分配新的存储空间，add_level 函数通过统一管理大块内存来实现内存扩展的高效性。
+//3.进行嵌入的压缩处理
+//4.打印和有效性检查
+//5.关键是如何有效地管理和操作嵌入列表展开，特别是嵌入的初始化、扩展、压缩和验证。

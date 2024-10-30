@@ -152,4 +152,4 @@ int main(int argc, char *argv[]) {
 	data_graph.clean();
 	return 0;
 }
-	
+	//一个基于图的子图匹配算法，通过 CUDA 并行化的方式来加速计算。中间过程一样的大同小异。

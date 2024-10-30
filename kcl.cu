@@ -1,3 +1,4 @@
+//目的是在给定的图中查找 k-clique（k 完全子图），也就是由 k 个节点组成的相互连接的子图。
 #include <stdlib.h>
 #include <iostream>
 #include "utils.h"
@@ -17,6 +18,7 @@ __global__ void set_validation(OffsetT *row_start, uint8_t *valid_candi, uint32_
 	}
 	return ;
 }
+//主要的参数有文件名、k 值（要找的 clique 大小）、图内存类型（存储方式）和是否为调试模式。
 int main(int argc, char *argv[]) {
 	if (argc < 4) {
 		printf("usage: ./kcl ($filename) ($clique size) graph_mem_type debug\n");
@@ -34,6 +36,7 @@ int main(int argc, char *argv[]) {
 	mem_type mt_graph = (mem_type)atoi(argv[3]);
 	if (mt_graph > 1)
 		check_cuda_error(cudaSetDeviceFlags(cudaDeviceMapHost));
+		//图读取
 	data_graph.read(file_name, false, mt_graph);//no label for k-clique
 	log_info(start.start());
 	log_info(start.count("nedges %lu, nnodes %d", data_graph.get_nedges(), data_graph.get_nnodes()));
@@ -49,13 +52,15 @@ int main(int argc, char *argv[]) {
 	check_cuda_error(cudaMalloc((void **)&results, sizeof(KeyT)*nnodes));
 	check_cuda_error(cudaMemset(results, -1, sizeof(KeyT)*nnodes));
 	uint8_t *valid_candi;
+	//首先通过 set_validation 内核，筛选出度数大于等于 k-1 的节点，作为有效候选节点。
+	//这样可以减少初始的候选节点数目，从而加快后续扩展的效率
 	check_cuda_error(cudaMalloc((void **)&valid_candi, sizeof(uint8_t)*nnodes));
 	check_cuda_error(cudaMemset(valid_candi, 0, sizeof(uint8_t)*nnodes));
 	set_validation<<<10000, 256>>>(data_graph.row_start, valid_candi, nnodes, k-1);
 	thrust::sequence(thrust::device, seq, seq + nnodes);
 	uint32_t valid_node_num = thrust::copy_if(thrust::device, seq, seq + nnodes, valid_candi, results, is_valid())- results;
 	check_cuda_error(cudaDeviceSynchronize());
-	emb_list.init(valid_node_num, k, mt_emb, false);
+	emb_list.init(valid_node_num, k, mt_emb, false);//初始化创建列表，valid_node_num创建第一层
 	emb_list.copy_to_level(0, results, 0, valid_node_num);
 	check_cuda_error(cudaFree(seq));
 	check_cuda_error(cudaFree(results));
@@ -63,7 +68,7 @@ int main(int argc, char *argv[]) {
 	//set the second level
 	//emb_list.add_level(nedges);
 	//expand for every vertex in the query graph
-	access_mode_controller access_controller;
+	access_mode_controller access_controller;//设置图的访问模式，基于当前嵌入列表和扩展约束计算最优的访问方式。
 	access_controller.set_vertex_page_border(data_graph);
 	log_info(start.count("access controller initalization done!"));
 	Clock Expand("Expand");
@@ -105,8 +110,10 @@ int main(int argc, char *argv[]) {
 	//#show the results in data_graph_h
 	emb_list.clean();
 	access_controller.clean();
-	data_graph.clean();
+	data_graph.clean();//清理
 
 	return 0;
 }
-	
+//实现了在图中查找 k-clique 的功能，使用 CUDA 来加速查找过程。
+//代码的核心思路是通过嵌入扩展的方法逐步找到符合条件的 k 个节点的完全子图，
+//使用csr数据结构和 set_validation() 函数进行节点筛选，结合嵌入扩展，最终实现了有效的 k-clique 搜索。

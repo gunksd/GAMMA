@@ -313,3 +313,6 @@ public:
   }
  };
 #endif
+//实现了一个用于图表示的 CSR（Compressed Sparse Row）图类 CSRGraph，用于存储和管理大规模图的数据结构
+//包括图的加载、清理以及通过 CUDA 在 GPU 上高效访问图的功能
+//CSR 格式是一种压缩存储图数据的格式，能够有效减少内存占用，并在 CUDA 中进行高效的邻接节点访问。

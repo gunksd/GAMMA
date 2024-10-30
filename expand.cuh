@@ -34,7 +34,7 @@ public:
 	uint64_t order_nbr;
 	uint8_t order_nbr_size;
 };
-
+//在一个 warp 内进行前缀和操作，将每个线程的结果归约到一个结果中，用于实现并行求和等操作。
 inline __device__ void warp_reduce(uint32_t lane_id, uint32_t value, uint32_t &result) {
 	result = value;
 	uint32_t tmp_result;
@@ -93,6 +93,7 @@ __device__ inline int32_t warp_binary_search(KeyT *list, uint32_t list_length, K
 	}
 	return -1;
 }
+//检查，决定哪些节点可以被加入当前的 embedding 扩展中，是扩展操作的关键逻辑
 __device__ inline bool emb_validation_check(KeyT *emb, CSRGraph g, int level, expand_constraint ec, 
 											KeyT dst) {
 	if(dst == 0xffffffff) return false;
@@ -136,6 +137,9 @@ __device__ inline bool emb_validation_check(KeyT *emb, CSRGraph g, int level, ex
 	}
 	return true;
 }
+//最小度的邻接列表放入共享内存，为后续的扩展操作做准备。
+//通过提前合并邻接列表，可以减少后续交叉检查的复杂度。
+
 __device__ inline void pre_merge(CSRGraph g, expand_constraint ec, uint8_t min_neighbor, KeyT *sh_emb,
 								 KeyT *sh_buffer, uint32_t &com_nbr_size, uint32_t lane_id) {
 	//put the minimum-length adjacency list into shared memory for later intersection
@@ -391,6 +395,7 @@ __global__ void extend_indevice(EmbeddingList emb, int level, CSRGraph g,
 	} 
 	return ;
 }
+//在 GPU 上进行 embedding 的扩展操作。
 __global__ void expand_kernel(EmbeddingList emb_list, int level, CSRGraph g, expand_constraint ec, emb_off_type base_off, 							   uint32_t f_size, KeyT *emb_vid, emb_off_type *emb_idx, uint32_t *counter) {
 	uint32_t total_warp = (blockDim.x * gridDim.x)>>5;
 	__shared__ KeyT sh_emb[BLOCK_SIZE/32][embedding_max_length];//sh_mem cache for warp-level embedding
@@ -1098,3 +1103,8 @@ void expand_dynamic_by_edge(CSRGraph &g, EmbeddingList &emb_list, int cur_level,
 
 
 #endif
+//代码的核心在于 如何在 GPU 上高效地扩展图中的 embedding，
+//通过精心设计的数据结构、高效的并行计算（如 warp 级别规约）、批处理和动态分配来最大化 GPU 的计算性能。
+//通过 warp 级别的操作和高效的内存管理技术来加速 embedding 的扩展，从而在大规模图上进行高效的子图模式匹配。`
+//expand_constraint 结构体：用于存储扩展的约束条件，决定哪些节点能够被加入到当前 embedding。
+//它们通过不同方式对 embedding 的扩展过程进行优化，从而达到高效执行子图匹配和邻接节点扩展的目的。

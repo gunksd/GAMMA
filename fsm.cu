@@ -1,3 +1,4 @@
+//主要目的：使用 GPU 来处理图数据，以找到指定大小和支持度的频繁子图模式
 #include <stdlib.h>
 #include <iostream>
 #include "utils.h"
@@ -6,6 +7,7 @@
 #include "aggregrate.cuh"
 #include <cuda_runtime.h>
 using namespace std;
+//处理输入并转换为csr文件，
 int main(int argc, char *argv[]) {
 	if (argc < 5) {
 		printf("usage: ./fsm ($data_graph) $(pattern_size) $(minimum_support) $(graph_mem) debug\n");
@@ -19,6 +21,7 @@ int main(int argc, char *argv[]) {
 	std::string file_name = argv[1];
 	CSRGraph data_graph;
 	mem_type mt_emb = (mem_type)1;//0 GPU 1 Unified 2 Zero 3 Combine
+	//数据加载
 	mem_type mt_graph = (mem_type)atoi(argv[4]);
 	if (mt_graph > 1)
 		check_cuda_error(cudaSetDeviceFlags(cudaDeviceMapHost));
@@ -29,6 +32,7 @@ int main(int argc, char *argv[]) {
 	uint32_t nnodes = data_graph.get_nnodes();
 	uint64_t nedges = data_graph.get_nedges();
 	int pattern_size = atoi(argv[2]);
+	//初始化 embedding，使用 thrust::sequence 将 embedding 初始化为所有节点
 	emb_list.init(nnodes, pattern_size, mt_emb, true);//TODO: need better initialization strategy: take degree and vertex label into consideration
 	log_info(start.count("embedding initialization done!"));
 	//check_cuda_error(cudaDeviceSynchronize());
@@ -54,6 +58,8 @@ int main(int argc, char *argv[]) {
 	uint32_t *freq_edge_patterns;
 	check_cuda_error(cudaMalloc((void **)&freq_edge_patterns, sizeof(uint32_t)*max_label*max_label/32));
 	check_cuda_error(cudaMemset(freq_edge_patterns, -1, sizeof(uint32_t)*max_label*max_label/32));
+	//迭代，迭代扩展会对 embedding 列表进行逐层增长，从而探索更大规模的候选子图。
+	//在扩展之后，通过 emb_compaction 函数压缩 embedding 列表，去除无效的 embedding，减少显存占用。
 	for (int i = 1; i < pattern_size; i ++) {
 		//expand
 		log_info(fsm.count("for the %dth iteration, start expand... ...",i));
@@ -101,4 +107,4 @@ int main(int argc, char *argv[]) {
 
 	return 0;
 }
-	
+//关键部分在于 embedding 的扩展和压缩，加速频繁子图模式的挖掘过程。
